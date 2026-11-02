@@ -48,6 +48,7 @@ def run_episode(env,
     """Run one episode using a random policy."""
     # we can make GLOBAL_SEED + episode if we would like a different env per episode
     observations, infos = env.reset(seed=GLOBAL_SEED + episode)
+    print(observations)
     team_reward = 0.0
     predator_agents = []
 
@@ -77,7 +78,12 @@ def run_episode(env,
         # Collect observations from the agents
         active_predators = [agent for agent in predator_agents if agent in env.agents ]
         predator_obs = np.stack([observations[agent] for agent in active_predators])
-        predator_obs = torch.from_numpy(predator_obs).float().to(device)
+        #kill one
+        killed = 0 
+        masked_predator_obs = predator_obs.copy()
+        masked_predator_obs[killed][:] = 0
+        print(masked_predator_obs)
+        masked_predator_obs = torch.from_numpy(masked_predator_obs).float().to(device)
 
         # now we connect the policy
         actions = {
@@ -90,7 +96,7 @@ def run_episode(env,
         global_state = torch.as_tensor(global_state, dtype=torch.float32).unsqueeze(0).to(device)
 
         with torch.no_grad():
-            predator_actions, log_proba, next_actor_hidden = actor.act(predator_obs, actor_hidden_states, actor_rnn_mask)
+            predator_actions, log_proba, next_actor_hidden = actor.act(masked_predator_obs, actor_hidden_states, actor_rnn_mask)
             value, next_critic_hidden = critic(global_state, critic_hidden_states, critic_rnn_mask)
 
         # Replace the current random action for one action from the policy
@@ -117,7 +123,7 @@ def run_episode(env,
 
         if episode_done:
             mask_value = 0.0
-            next_actor_obs = torch.zeros_like(predator_obs)
+            next_actor_obs = torch.zeros_like(masked_predator_obs)
             next_state = torch.zeros_like(torch.tensor(env.state(), dtype=torch.float32, device=device))
         else:
             mask_value = 1.0
@@ -137,7 +143,7 @@ def run_episode(env,
         next_actor_rnn_mask = torch.full((len(predator_agents), 1), mask_value, dtype=torch.float32).to(device)
         next_critic_rnn_mask = torch.full((1, 1), mask_value, dtype=torch.float32).to(device)
 
-        buffer.insert(predator_obs,
+        buffer.insert(masked_predator_obs,
                       # remove the first dimension so it accommodates the format of the buffer
                       global_state.squeeze(0),
                       actor_hidden_states,
