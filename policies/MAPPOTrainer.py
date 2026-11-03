@@ -13,7 +13,7 @@ class MAPPOTrainer:
                  entropy_coef = 0.01,
                  value_loss_coef = 1.0,
                  max_grad_norm = 10.0,
-                 ppo_epochs = 10):
+                 ppo_epochs = 100):
         self.actor = actor
         self.actor_optimizer = actor_optimizer
         self.critic = critic

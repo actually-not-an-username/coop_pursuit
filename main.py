@@ -18,7 +18,7 @@ GLOBAL_SEED = 42
 NUM_EPISODES = 10
 MAX_STEPS = 30
 RENDER = True
-HIDDEN_DIM = 64
+HIDDEN_DIM = 128
 
 
 def get_env(render_mode: str | None = None):

@@ -1,4 +1,7 @@
+import torch
 from torch import nn
+from torch.jit.frontend import NotSupportedError
+
 
 class RNNLayer(nn.Module):
     def __init__(
@@ -37,12 +40,23 @@ class RNNLayer(nn.Module):
 
         self.norm = nn.LayerNorm(hidden_dim)
 
+
     def forward(
         self,
         x,
         hidden_state,
         mask,
     ):
+        if x.dim() == 2:
+            return self.forward_2d(x, hidden_state, mask)
+        elif x.dim() == 3:
+            return self.forward_3d(x, hidden_state, mask)
+        else:
+            raise NotSupportedError
+
+
+
+    def forward_2d(self, x, hidden_state, mask):
         # hidden_state: [batch, recurrent_layers, hidden_dim]
         # mask: [batch, 1]
         hidden_state = hidden_state * mask.unsqueeze(-1)
@@ -66,5 +80,52 @@ class RNNLayer(nn.Module):
         hidden_state = hidden_state.transpose(0, 1).contiguous()
 
         output = self.norm(output)
+
+        return output, hidden_state
+
+    def forward_3d(self, x, hidden_state, mask):
+        # when doing recurrent training the shapes of the tensors are
+        # different from the original single episode training
+        chunk_length, batch_size, _ = x.shape
+        outputs = []
+
+        # hidden_state: [batch, recurrent_layers, hidden_dim]
+        # mask: [recurrent_chunk_length, batch, 1]
+        hidden_state = hidden_state.transpose(0, 1).contiguous()
+
+        for chunk in range(chunk_length):
+            # ---------------------------------------------
+            # Reset hidden state wherever mask[t] == 0
+            #
+            # hidden_state: [recurrent_layers, batch, hidden_dim]
+            # mask: [batch, 1]
+            # ---------------------------------------------
+            # reshape mask to [1, batch, 1]
+            hidden_state = hidden_state * mask[chunk].unsqueeze(0)
+
+            # x_t here is [batch, hidden_dim] but this GRU cell expects [1, batch, hidden_dim]
+            x_t = x[chunk].unsqueeze(0)
+
+            output_t, hidden_state = self.gru(
+                x_t,
+                hidden_state,
+            )
+
+            # [1, batch, hidden_dim] -> [batch, hidden_dim]
+            output_t = output_t.squeeze(0)
+            outputs.append(output_t)
+
+        # Format the output from a list of T (recurrent_chunk_length) tensors to
+        # a tensor of shape [chunk_length, batch, hidden_dim]
+        output = torch.stack(outputs, dim=0)
+        output = self.norm(output)
+
+        # Back to:
+        # [batch, recurrent_layers, hidden_dim] -> original form
+        hidden_state = (
+            hidden_state
+            .transpose(0, 1)
+            .contiguous()
+        )
 
         return output, hidden_state
