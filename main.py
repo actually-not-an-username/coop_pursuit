@@ -19,6 +19,10 @@ NUM_EPISODES = 10
 MAX_STEPS = 30
 RENDER = True
 HIDDEN_DIM = 64
+KILLED_OBS = np.random.randint(0,3) #this one is killed
+
+OBS_KILL_DURATION = 5
+OBS_KILL_START = np.random.randint(0,MAX_STEPS-OBS_KILL_DURATION)
 
 
 def get_env(render_mode: str | None = None):
@@ -79,9 +83,10 @@ def run_episode(env,
         active_predators = [agent for agent in predator_agents if agent in env.agents ]
         predator_obs = np.stack([observations[agent] for agent in active_predators])
         #kill one
-        killed = 0 
         masked_predator_obs = predator_obs.copy()
-        masked_predator_obs[killed][:] = 0
+        obs_masked_step_max = OBS_KILL_START + OBS_KILL_DURATION
+        if step >= OBS_KILL_START and step < obs_masked_step_max:
+            masked_predator_obs[KILLED_OBS][:] = 0
         print(masked_predator_obs)
         masked_predator_obs = torch.from_numpy(masked_predator_obs).float().to(device)
 
