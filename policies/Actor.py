@@ -43,7 +43,8 @@ class Actor(nn.Module):
     @torch.no_grad()
     def act(self, observation, hidden_state, mask):
         dist, next_hidden_state = self.forward(observation, hidden_state, mask)
-        action = dist.sample()
+        action = dist.sample() # This action selection allows exploration
+        # action = dist.probs.argmax(dim=-1) # This action allows exploitation
         log_prob = dist.log_prob(action)
         return action, log_prob, next_hidden_state
 

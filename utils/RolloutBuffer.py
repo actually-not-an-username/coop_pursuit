@@ -150,6 +150,7 @@ class RolloutBuffer:
 
         self.step += 1
 
+
     def compute_return_and_advantages(self,
                                       next_value,
                                       gamma= 0.99, # Using the same gamma and lambda as the original MAPPO paper
@@ -170,3 +171,63 @@ class RolloutBuffer:
             self.advantages[t] = gae
             self.returns[:self.step] = (self.advantages[:self.step] + self.values[:self.step])
 
+
+    def recurrent_generator(
+        self,
+        recurrent_chunk_length,
+        advantages = None,
+    ):
+        """
+            Split the current rollout into temporally contiguous
+            recurrent sequences.
+
+            Example with T=25 and chunk length=10:
+
+                chunk 1: 0...9
+                chunk 2: 10...19
+                chunk 3: 20...24
+            """
+
+        t = self.step
+
+        if t == 0:
+            return
+
+        if advantages is None:
+            advantages = self.advantages[:t]
+
+        for start in range(0, t, recurrent_chunk_length):
+            end = min(start + recurrent_chunk_length, t)
+
+            # Actor data
+            observations = self.observations[start:end]
+            actions = self.actions[start:end]
+            old_log_probs = self.old_log_probs[start:end]
+            actor_masks = self.actor_rnn_masks[start:end]
+
+            # IMPORTANT:
+            # During training we only provide the GRU the state at the beginning of the sequence.
+            actor_initial_hidden = self.actor_hidden_states[start]
+
+            advantages = self.advantages[start:end]
+
+            # Critic data
+            states = self.states[start:end]
+            returns = self.returns[start:end]
+            critic_masks = self.critic_rnn_masks[start:end]
+
+            critic_initial_hidden = self.critic_hidden_states[start]
+
+            yield {
+                "observations": observations,
+                "actions": actions,
+                "old_log_probs": old_log_probs,
+                "advantages": advantages,
+                "actor_masks": actor_masks,
+                "actor_initial_hidden": actor_initial_hidden,
+
+                "states": states,
+                "returns": returns,
+                "critic_masks": critic_masks,
+                "critic_initial_hidden": critic_initial_hidden,
+            }

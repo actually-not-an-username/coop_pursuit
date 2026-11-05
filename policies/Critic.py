@@ -17,7 +17,5 @@ class Critic(nn.Module):
     def forward(self, state, hidden_state, mask):
         x = self.mlp(state)
         x, next_hidden_state = self.rnn(x, hidden_state, mask)
-
         value = self.value_head(x)
-        value = value.squeeze(-1)
         return value, next_hidden_state
