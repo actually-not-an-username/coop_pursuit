@@ -209,7 +209,7 @@ class RolloutBuffer:
             # During training we only provide the GRU the state at the beginning of the sequence.
             actor_initial_hidden = self.actor_hidden_states[start]
 
-            advantages = self.advantages[start:end]
+            chunk_advantages = advantages[start:end]
 
             # Critic data
             states = self.states[start:end]
@@ -222,7 +222,7 @@ class RolloutBuffer:
                 "observations": observations,
                 "actions": actions,
                 "old_log_probs": old_log_probs,
-                "advantages": advantages,
+                "advantages": chunk_advantages,
                 "actor_masks": actor_masks,
                 "actor_initial_hidden": actor_initial_hidden,
 
