@@ -1,3 +1,5 @@
+import random
+
 import torch
 
 from utils.RolloutBuffer import RolloutBuffer
@@ -28,20 +30,27 @@ class MAPPOTrainer:
         self.recurrent_chunk_length = recurrent_chunk_length
         self.huber_delta = huber_delta
 
-    def update_actor(self, buffer: RolloutBuffer):
-        t = buffer.step
-
-        # Process advantages in a separate structure to avoid messing with the originals
-        normalized_advantages = buffer.advantages[:t].clone()
-        normalized_advantages = (normalized_advantages - normalized_advantages.mean()) / (normalized_advantages.std(unbiased=False) + 1e-5)
-
+    def update_actor(
+        self,
+        buffers: list[RolloutBuffer],
+        normalized_advantages: list[torch.Tensor],
+    ):
         policy_losses = []
         entropy_records = []
         ratios = []
         clip_fractions = []
         chunk_lengths = []
 
-        for chunk in buffer.recurrent_generator(self.recurrent_chunk_length, normalized_advantages):
+        chunks = []
+        for buffer, advantages in zip(buffers, normalized_advantages):
+            for chunk in buffer.recurrent_generator(
+                self.recurrent_chunk_length,
+                advantages,
+            ):
+                chunks.append((chunk, buffer.num_agents))
+        random.shuffle(chunks)
+
+        for chunk, num_agents in chunks:
             obs = chunk["observations"]
             actions = chunk["actions"]
             old_log_probs = chunk["old_log_probs"]
@@ -54,7 +63,7 @@ class MAPPOTrainer:
             # interestingly enough expand does not copies the data but rather broadcast a view of the data hence modifications
             # to this tensor s.b avoided
             agent_advantages = advantages.unsqueeze(-1) # Add a new dimension to the tensor
-            agent_advantages = agent_advantages.expand(-1, buffer.num_agents) # Now make each agent has their own advantage
+            agent_advantages = agent_advantages.expand(-1, num_agents) # Now make each agent has their own advantage
 
             # reevaluate the actions from the chunk (old policy)
             new_log_probs, entropy, _ = self.actor.evaluate_actions(obs, initial_hidden_state, actions, mask)
@@ -91,8 +100,8 @@ class MAPPOTrainer:
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
         self.actor_optimizer.step()
 
-        mean_ratio = torch.stack(ratios).mean()
-        mean_clip_fraction = torch.stack(clip_fractions).mean()
+        mean_ratio = (torch.stack(ratios) * weight).sum()
+        mean_clip_fraction = (torch.stack(clip_fractions) * weight).sum()
 
         return {
             "actor_loss": actor_loss.item(),
@@ -102,12 +111,16 @@ class MAPPOTrainer:
             "clip_fraction": mean_clip_fraction.item(),
         }
 
-    def update_critic(self, buffer: RolloutBuffer):
-        t = buffer.step
+    def update_critic(self, buffers: list[RolloutBuffer]):
         value_losses = []
         chunk_lengths = []
 
-        for chunk in buffer.recurrent_generator(self.recurrent_chunk_length):
+        chunks = []
+        for buffer in buffers:
+            chunks.extend(buffer.recurrent_generator(self.recurrent_chunk_length))
+        random.shuffle(chunks)
+
+        for chunk in chunks:
             states = chunk["states"]
             returns = chunk["returns"]
             masks = chunk["critic_masks"]
@@ -145,13 +158,33 @@ class MAPPOTrainer:
             "value_loss": value_loss.item(),
         }
 
-    def update(self, buffer: RolloutBuffer):
+    def update(self, buffers: list[RolloutBuffer]):
+        if not buffers:
+            raise ValueError("At least one rollout buffer is required.")
+
+        # Normalize advantages across the complete on-policy rollout batch,
+        # rather than separately within each short episode.
+        all_advantages = torch.cat([
+            buffer.advantages[:buffer.step]
+            for buffer in buffers
+        ])
+        advantage_mean = all_advantages.mean()
+        advantage_std = all_advantages.std(unbiased=False)
+        normalized_advantages = [
+            (buffer.advantages[:buffer.step] - advantage_mean)
+            / (advantage_std + 1e-5)
+            for buffer in buffers
+        ]
+
         final_actor_result = {}
         final_critic_result = {}
 
         for epoch in range(self.ppo_epochs):
-            final_actor_result = self.update_actor(buffer)
-            final_critic_result = self.update_critic(buffer)
+            final_actor_result = self.update_actor(
+                buffers,
+                normalized_advantages,
+            )
+            final_critic_result = self.update_critic(buffers)
 
             print(
                 f"  PPO Epoch {epoch + 1} | "
