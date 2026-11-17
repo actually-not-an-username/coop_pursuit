@@ -34,6 +34,7 @@ EVAL_SEED=int(os.getenv("EVAL_SEED", np.nan))
 TEST_EPISODES=int(os.getenv("TEST_EPISODES", np.nan))
 TEST_SEED=int(os.getenv("TEST_SEED", np.nan))
 SHAPING=os.getenv("SHAPING", "True").strip().lower() == "true"
+TEST_OBSERVATION_FAILURE_STEPS=int(os.getenv("TEST_OBSERVATION_FAILURE_STEPS", np.nan))
 
 
 def run_episode(env,
@@ -208,100 +209,7 @@ def run_episode(env,
     }
 
 
-@torch.no_grad()
-def evaluate_policy(
-    actor: Actor | None,
-    device: torch.device,
-    seed: int,
-    episodes: int = EVAL_EPISODES,
-    action_mode: str = "argmax",
-) -> list[dict[str, float | bool | int | None]]:
-    """Evaluate an actor or random policy on a fixed set of episode seeds."""
-    if action_mode not in {"argmax", "sample", "random"}:
-        raise ValueError(f"Unknown evaluation action mode: {action_mode}")
-    if action_mode != "random" and actor is None:
-        raise ValueError("An actor is required for argmax and sampled evaluation.")
 
-    env = get_env()
-    actor_was_training = actor.training if actor is not None else False
-    if actor is not None:
-        actor.eval()
-    episode_returns = []
-
-    try:
-        predators = [agent for agent in env.possible_agents if "adversary" in agent]
-        prey_agents = [agent for agent in env.possible_agents if "adversary" not in agent]
-        for episode_index in range(episodes):
-            episode_seed = seed + episode_index
-            # Make sampled-policy evaluation repeatable without changing training.
-            observations, _ = env.reset(seed=episode_seed)
-            for agent_index, agent in enumerate(env.possible_agents):
-                env.action_space(agent).seed(episode_seed + agent_index + 1)
-
-            hidden_state = Utils.init_hidden_state(len(predators), HIDDEN_DIM)
-            mask = Utils.init_rnn_mask(len(predators), 1)
-            episode_return = 0.0
-            capture_step = None
-
-            for step_index in range(MAX_STEPS):
-                if not env.agents:
-                    break
-
-                active_predators = [agent for agent in predators if agent in env.agents]
-                predator_obs = torch.as_tensor(
-                    np.stack([observations[agent] for agent in active_predators]),
-                    dtype=torch.float32,
-                    device=device,
-                )
-                actions = {
-                    agent: env.action_space(agent).sample()
-                    for agent in env.agents
-                    if agent not in predators
-                }
-                if action_mode == "random":
-                    actions.update({
-                        agent: env.action_space(agent).sample()
-                        for agent in active_predators
-                    })
-                else:
-                    dist, next_hidden_state = actor(predator_obs, hidden_state, mask)
-                    if action_mode == "argmax":
-                        predator_actions = dist.probs.argmax(dim=-1)
-                    else:
-                        predator_actions = dist.sample()
-                    for index, agent in enumerate(active_predators):
-                        actions[agent] = int(predator_actions[index].item())
-                    hidden_state = next_hidden_state
-
-                observations, rewards, terminations, truncations, _infos = env.step(actions)
-                episode_return += float(np.mean([rewards[agent] for agent in predators]))
-                if capture_step is None and all(
-                    terminations.get(agent, False) for agent in prey_agents
-                ):
-                    capture_step = step_index + 1
-                episode_done = all(
-                    terminations.get(agent, False) or truncations.get(agent, False)
-                    for agent in predators
-                )
-                mask = torch.full(
-                    (len(predators), 1), 0.0 if episode_done else 1.0,
-                    dtype=torch.float32,
-                    device=device,
-                )
-                if episode_done:
-                    break
-
-            episode_returns.append({
-                "return": episode_return,
-                "captured": capture_step is not None,
-                "capture_step": capture_step,
-            })
-    finally:
-        env.close()
-        if actor is not None:
-            actor.train(actor_was_training)
-
-    return episode_returns
 
 
 def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
@@ -395,7 +303,7 @@ def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
                 while next_evaluation_episode <= episode_index:
                     next_evaluation_episode += EVAL_INTERVAL
 
-                eval_episodes = evaluate_policy(actor, device, eval_seed)
+                eval_episodes = actor.evaluate_policy(device, eval_seed, int(os.getenv("EVAL_EPISODES", np.nan)))
                 eval_returns = [episode["return"] for episode in eval_episodes]
                 eval_mean = float(np.mean(eval_returns))
                 eval_std = float(np.std(eval_returns))
@@ -463,10 +371,9 @@ def test_checkpoint(actor: Actor, device: torch.device) -> dict[str, float]:
     for label, policy, mode in (
         ("PPO deterministic", actor, "argmax"),
         ("PPO sampled", actor, "sample"),
-        ("Random", None, "random"),
+        ("Random", actor, "random"),
     ):
-        episodes = evaluate_policy(
-            policy,
+        episodes = actor.evaluate_policy(
             device,
             TEST_SEED,
             TEST_EPISODES,
