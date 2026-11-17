@@ -1,8 +1,6 @@
-import random
-
 import torch
 
-from utils.RolloutBuffer import RolloutBuffer
+from utils.VectorRolloutBuffer import VectorRolloutBuffer
 
 
 class MAPPOTrainer:
@@ -32,8 +30,8 @@ class MAPPOTrainer:
 
     def update_actor(
         self,
-        buffers: list[RolloutBuffer],
-        normalized_advantages: list[torch.Tensor],
+        buffer: VectorRolloutBuffer,
+        normalized_advantages: torch.Tensor,
     ):
         policy_losses = []
         entropy_records = []
@@ -41,16 +39,10 @@ class MAPPOTrainer:
         clip_fractions = []
         chunk_lengths = []
 
-        chunks = []
-        for buffer, advantages in zip(buffers, normalized_advantages):
-            for chunk in buffer.recurrent_generator(
-                self.recurrent_chunk_length,
-                advantages,
-            ):
-                chunks.append((chunk, buffer.num_agents))
-        random.shuffle(chunks)
-
-        for chunk, num_agents in chunks:
+        for chunk in buffer.recurrent_generator(
+            self.recurrent_chunk_length,
+            normalized_advantages,
+        ):
             obs = chunk["observations"]
             actions = chunk["actions"]
             old_log_probs = chunk["old_log_probs"]
@@ -59,12 +51,6 @@ class MAPPOTrainer:
             advantages = chunk["advantages"]
             chunk_lengths.append(obs.shape[0])
 
-            # This code modifies the shape of the advantages from [recurrent_chunk_lenght] to [recurrent_chunk_lenght, number of agents]
-            # interestingly enough expand does not copies the data but rather broadcast a view of the data hence modifications
-            # to this tensor s.b avoided
-            agent_advantages = advantages.unsqueeze(-1) # Add a new dimension to the tensor
-            agent_advantages = agent_advantages.expand(-1, num_agents) # Now make each agent has their own advantage
-
             # reevaluate the actions from the chunk (old policy)
             new_log_probs, entropy, _ = self.actor.evaluate_actions(obs, initial_hidden_state, actions, mask)
             # PPO probability ratio -> pi_new(a|s)/pi_old(a|s)
@@ -72,9 +58,9 @@ class MAPPOTrainer:
             ratios.append(ratio.mean())
 
             # surrogate objective 1 = unclipped ratio (per agent)
-            surrogate_obj_1 = ratio * agent_advantages
+            surrogate_obj_1 = ratio * advantages
             # surrogate objective 2 = clipped ratio
-            surrogate_obj_2 = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * agent_advantages
+            surrogate_obj_2 = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * advantages
 
             policy_loss = -torch.min(surrogate_obj_1, surrogate_obj_2).mean()
             policy_losses.append(policy_loss)
@@ -111,31 +97,19 @@ class MAPPOTrainer:
             "clip_fraction": mean_clip_fraction.item(),
         }
 
-    def update_critic(self, buffers: list[RolloutBuffer]):
+    def update_critic(self, buffer: VectorRolloutBuffer):
         value_losses = []
         chunk_lengths = []
 
-        chunks = []
-        for buffer in buffers:
-            chunks.extend(buffer.recurrent_generator(self.recurrent_chunk_length))
-        random.shuffle(chunks)
-
-        for chunk in chunks:
+        for chunk in buffer.recurrent_generator(self.recurrent_chunk_length):
             states = chunk["states"]
             returns = chunk["returns"]
             masks = chunk["critic_masks"]
             initial_hidden = chunk["critic_initial_hidden"]
             chunk_lengths.append(states.shape[0])
 
-            # states has the shape [recurrent_chunk_length, batch_size, state_dim]
-            # and the requirement is [recurrent_chunk_length, state_dim]
-            states = states.unsqueeze(1)
-
             predicted_value, _ = self.critic(states, initial_hidden, masks)
             predicted_value = predicted_value.squeeze(-1)
-
-            if predicted_value.dim() == 2:
-                predicted_value = predicted_value.squeeze(-1)
 
             # Calculate the loss -> Instead of MSE the authors of MAPPO use Hubber Loss
             value_loss = torch.nn.functional.huber_loss(predicted_value, returns, delta=self.huber_delta)
@@ -158,33 +132,25 @@ class MAPPOTrainer:
             "value_loss": value_loss.item(),
         }
 
-    def update(self, buffers: list[RolloutBuffer]):
-        if not buffers:
-            raise ValueError("At least one rollout buffer is required.")
-
+    def update(self, buffer: VectorRolloutBuffer):
         # Normalize advantages across the complete on-policy rollout batch,
-        # rather than separately within each short episode.
-        all_advantages = torch.cat([
-            buffer.advantages[:buffer.step]
-            for buffer in buffers
-        ])
+        # rather than separately within each environment or episode.
+        all_advantages = buffer.advantages[:buffer.step]
         advantage_mean = all_advantages.mean()
         advantage_std = all_advantages.std(unbiased=False)
-        normalized_advantages = [
-            (buffer.advantages[:buffer.step] - advantage_mean)
-            / (advantage_std + 1e-5)
-            for buffer in buffers
-        ]
+        normalized_advantages = (
+            buffer.advantages[:buffer.step] - advantage_mean
+        ) / (advantage_std + 1e-5)
 
         final_actor_result = {}
         final_critic_result = {}
 
         for epoch in range(self.ppo_epochs):
             final_actor_result = self.update_actor(
-                buffers,
+                buffer,
                 normalized_advantages,
             )
-            final_critic_result = self.update_critic(buffers)
+            final_critic_result = self.update_critic(buffer)
 
             print(
                 f"  PPO Epoch {epoch + 1} | "
