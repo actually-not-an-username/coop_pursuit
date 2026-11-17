@@ -2,83 +2,38 @@
 from __future__ import annotations
 
 import argparse
-import random
 from collections import deque
 from pathlib import Path
 
 import numpy as np
 import torch
-from mpe2 import simple_tag_v3
 
 from policies.Actor import Actor
 from policies.Critic import Critic
 from policies.MAPPOTrainer import MAPPOTrainer
 from utils import Utils
+from utils.EnvUtils import get_env, set_seed
 from utils.RolloutBuffer import RolloutBuffer
 
+import os
+from dotenv import load_dotenv
+
 # Configuration
-GLOBAL_SEED = 42
-NUM_EPISODES = 10000
-ROLLOUT_EPISODES = 32
-MAX_STEPS = 25
-RENDER = False
-HIDDEN_DIM = 128
-CHECKPOINT_PATH = Path("checkpoints/best_actor.pt")
-EVAL_INTERVAL = 320
-EVAL_EPISODES = 100
-EVAL_SEED = 10_000
-TEST_EPISODES = 100
-TEST_SEED = 20_000
-SHAPING = True
+load_dotenv("config.env")
 
-
-def get_env(render_mode: str | None = None):
-    """Create the cooperative pursuit environment."""
-    return simple_tag_v3.parallel_env(
-        render_mode=render_mode,
-        max_cycles=MAX_STEPS,
-        terminate_on_success=True,
-    )
-
-def set_seed(seed: int, device: torch.device) -> None:
-    """Seed the main random number generators."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(seed)
-    elif device.type == "mps":
-        torch.mps.manual_seed(seed)
-
-
-def get_torch_rng_state(device: torch.device):
-    """Capture CPU and selected accelerator RNG state for isolated evaluation."""
-    state = {"cpu": torch.get_rng_state()}
-    if device.type == "cuda":
-        state["cuda"] = torch.cuda.get_rng_state_all()
-    elif device.type == "mps":
-        state["mps"] = torch.mps.get_rng_state(device)
-    return state
-
-
-def set_torch_rng_state(state, device: torch.device) -> None:
-    """Restore CPU and selected accelerator RNG state."""
-    torch.set_rng_state(state["cpu"])
-    if device.type == "cuda":
-        torch.cuda.set_rng_state_all(state["cuda"])
-    elif device.type == "mps":
-        torch.mps.set_rng_state(state["mps"], device)
-
-
-def seed_torch_rng(seed: int, device: torch.device) -> None:
-    """Seed the RNG used by a sampled policy on the selected device."""
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(seed)
-    elif device.type == "mps":
-        torch.mps.manual_seed(seed)
-    else:
-        torch.manual_seed(seed)
+GLOBAL_SEED=int(os.getenv("GLOBAL_SEED", np.nan))
+NUM_EPISODES=int(os.getenv("NUM_EPISODES", np.nan))
+ROLLOUT_EPISODES=int(os.getenv("ROLLOUT_EPISODES", np.nan))
+MAX_STEPS=int(os.getenv("MAX_STEPS", np.nan))
+RENDER=os.getenv("RENDER", "False").strip().lower() == "true"
+HIDDEN_DIM=int(os.getenv("HIDDEN_DIM", np.nan))
+CHECKPOINT_PATH=Path(os.getenv("CHECKPOINT_PATH", "."))
+EVAL_INTERVAL=int(os.getenv("EVAL_INTERVAL", np.nan))
+EVAL_EPISODES=int(os.getenv("EVAL_EPISODES", np.nan))
+EVAL_SEED=int(os.getenv("EVAL_SEED", np.nan))
+TEST_EPISODES=int(os.getenv("TEST_EPISODES", np.nan))
+TEST_SEED=int(os.getenv("TEST_SEED", np.nan))
+SHAPING=os.getenv("SHAPING", "True").strip().lower() == "true"
 
 
 def run_episode(env,
@@ -268,19 +223,17 @@ def evaluate_policy(
         raise ValueError("An actor is required for argmax and sampled evaluation.")
 
     env = get_env()
-    actor_was_training = actor.training if actor is not None else None
+    actor_was_training = actor.training if actor is not None else False
     if actor is not None:
         actor.eval()
     episode_returns = []
-    torch_rng_state = get_torch_rng_state(device)
 
     try:
         predators = [agent for agent in env.possible_agents if "adversary" in agent]
         prey_agents = [agent for agent in env.possible_agents if "adversary" not in agent]
         for episode_index in range(episodes):
             episode_seed = seed + episode_index
-            # Make sampled-policy evaluation repeatable without changing training RNG state.
-            seed_torch_rng(episode_seed, device)
+            # Make sampled-policy evaluation repeatable without changing training.
             observations, _ = env.reset(seed=episode_seed)
             for agent_index, agent in enumerate(env.possible_agents):
                 env.action_space(agent).seed(episode_seed + agent_index + 1)
@@ -345,7 +298,6 @@ def evaluate_policy(
             })
     finally:
         env.close()
-        set_torch_rng_state(torch_rng_state, device)
         if actor is not None:
             actor.train(actor_was_training)
 
@@ -373,7 +325,7 @@ def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
             actor, actor_optimizer, critic, critic_optimizer, ppo_epochs=5
         )
 
-        best_eval_mean = float("-inf")
+        best_eval_mean = float("inf")
         first_capture_episode = None
         recent_captures = deque(maxlen=100)
         episode_index = 0
