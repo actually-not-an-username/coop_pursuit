@@ -35,7 +35,7 @@ EVAL_EPISODES = 100
 EVAL_SEED = 10_000
 TEST_EPISODES = 100
 TEST_SEED = 20_000
-TEST_OBSERVATION_FAILURE_STEPS = 25  # Set to 0 to disable deployment failure.
+TEST_OBSERVATION_FAILURE_STEPS = 10  # Set to 0 to disable deployment failure.
 SHAPING = True
 
 
@@ -268,8 +268,8 @@ def evaluate_policy(
     episodes: int = EVAL_EPISODES,
     action_mode: str = "argmax",
     observation_failure_steps: int = 0,
-) -> list[dict[str, float | bool | int | str | None]]:
-    """Evaluate a policy, optionally with one predator's observations disabled."""
+) -> list[dict[str, float | bool | int | tuple[str, ...] | None]]:
+    """Evaluate a policy, optionally disabling N-1 predators' observations."""
     if action_mode not in {"argmax", "sample", "random"}:
         raise ValueError(f"Unknown evaluation action mode: {action_mode}")
     if action_mode != "random" and actor is None:
@@ -291,12 +291,17 @@ def evaluate_policy(
         prey_agents = [agent for agent in env.possible_agents if "adversary" not in agent]
         for episode_index in range(episodes):
             episode_seed = seed + episode_index
-            failed_agent = None
+            failed_agents: tuple[str, ...] = ()
             failure_start = None
             failure_end = None
             if observation_failure_steps > 0 and action_mode != "random":
                 failure_rng = random.Random(episode_seed)
-                failed_agent = failure_rng.choice(predators)
+                failed_agents = tuple(
+                    failure_rng.sample(
+                        predators,
+                        k=len(predators) - 1,
+                    )
+                )
                 failure_start = failure_rng.randint(
                     0,
                     MAX_STEPS - observation_failure_steps,
@@ -325,12 +330,14 @@ def evaluate_policy(
                     device=device,
                 )
                 failure_active = (
-                    failed_agent in active_predators
+                    failure_start is not None
                     and failure_start <= step_index < failure_end
                 )
                 if failure_active:
-                    failed_index = active_predators.index(failed_agent)
-                    predator_obs[failed_index].zero_()
+                    for failed_agent in failed_agents:
+                        if failed_agent in active_predators:
+                            failed_index = active_predators.index(failed_agent)
+                            predator_obs[failed_index].zero_()
 
                 actions = {
                     agent: env.action_space(agent).sample()
@@ -374,7 +381,7 @@ def evaluate_policy(
                 "return": episode_return,
                 "captured": capture_step is not None,
                 "capture_step": capture_step,
-                "failed_agent": failed_agent,
+                "failed_agents": failed_agents,
                 "observation_failure_start": failure_start,
                 "observation_failure_end": failure_end,
             })
@@ -564,7 +571,7 @@ def test_checkpoint(actor: Actor, device: torch.device) -> dict[str, float]:
     conditions = (
         ("No observation masking", 0),
         (
-            "Observation masking: one random predator for "
+            "Observation masking: N-1 random predators for "
             f"{TEST_OBSERVATION_FAILURE_STEPS} steps",
             TEST_OBSERVATION_FAILURE_STEPS,
         ),
