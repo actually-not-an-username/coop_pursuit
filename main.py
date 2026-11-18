@@ -368,16 +368,19 @@ def test_checkpoint(actor: Actor, device: torch.device) -> dict[str, float]:
         f"(seeds {TEST_SEED}–{TEST_SEED + TEST_EPISODES - 1})..."
     )
     results = {}
-    for label, policy, mode in (
-        ("PPO deterministic", actor, "argmax"),
-        ("PPO sampled", actor, "sample"),
-        ("Random", actor, "random"),
+    for label, policy, mode, mask in ( #add masking boolean, to compare no mask + mask
+        ("PPO deterministic", actor, "argmax", False),
+        ("PPO sampled", actor, "sample", False),
+        ("PPO deterministic obs loss", actor, "argmax",True),
+        ("PPO sampled obs loss", actor, "sample", True),
+        ("Random", actor, "random", False),
     ):
         episodes = actor.evaluate_policy(
             device,
             TEST_SEED,
             TEST_EPISODES,
             action_mode=mode,
+            masking=mask
         )
         returns = [episode["return"] for episode in episodes]
         mean = float(np.mean(returns))

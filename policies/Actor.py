@@ -75,6 +75,7 @@ class Actor(nn.Module):
                 seed: int,
                 episodes: int,
                 action_mode: str = "argmax",
+                masking : bool = False, #adding to make training not masked, eval masked
         ) -> list[dict[str, float | bool | int | None]]:
             """Evaluate an actor or random policy on a fixed set of episode seeds."""
             if action_mode not in {"argmax", "sample", "random"}:
@@ -107,8 +108,8 @@ class Actor(nn.Module):
                     for step_index in range(MAX_STEPS):
                         if not env.agents:
                             break
-
-                        if step_index >= starting_sensor_loss_step and step_index < (starting_sensor_loss_step + TEST_OBSERVATION_FAILURE_STEPS):
+                        #masking now checked
+                        if step_index >= starting_sensor_loss_step and step_index < (starting_sensor_loss_step + TEST_OBSERVATION_FAILURE_STEPS) and masking:
                             for agent in predators:
                                 if agent != the_chosen:
                                     observations[agent] = np.zeros_like(observations[agent])
