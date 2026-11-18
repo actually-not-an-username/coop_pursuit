@@ -230,7 +230,7 @@ def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
         critic = Critic(state_dim, HIDDEN_DIM).to(device)
         critic_optimizer = torch.optim.Adam(critic.parameters(), lr=5e-4, eps=1e-5)
         trainer = MAPPOTrainer(
-            actor, actor_optimizer, critic, critic_optimizer, ppo_epochs=5
+            actor, actor_optimizer, critic, critic_optimizer, ppo_epochs=10
         )
 
         best_eval_mean = float("-inf") #changed mean to -inf to make sure it actually saves 
