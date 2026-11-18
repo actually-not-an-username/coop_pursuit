@@ -2,80 +2,39 @@
 from __future__ import annotations
 
 import argparse
-import random
+from collections import deque
 from pathlib import Path
 
 import numpy as np
 import torch
-from mpe2 import simple_tag_v3
 
 from policies.Actor import Actor
 from policies.Critic import Critic
 from policies.MAPPOTrainer import MAPPOTrainer
 from utils import Utils
+from utils.EnvUtils import get_env, set_seed
 from utils.RolloutBuffer import RolloutBuffer
 
+import os
+from dotenv import load_dotenv
+
 # Configuration
-GLOBAL_SEED = 42
-NUM_EPISODES = 1000
-MAX_STEPS = 25
-RENDER = False
-HIDDEN_DIM = 128
-CHECKPOINT_PATH = Path("checkpoints/best_actor.pt")
-EVAL_INTERVAL = 20
-EVAL_EPISODES = 10
-EVAL_SEED = 10_000
-TEST_EPISODES = 100
-TEST_SEED = 20_000
+load_dotenv("config.env")
 
-
-def get_env(render_mode: str | None = None):
-    """Create the cooperative pursuit environment."""
-    return simple_tag_v3.parallel_env(
-        render_mode=render_mode,
-        max_cycles=MAX_STEPS,
-        terminate_on_success=True,
-    )
-
-def set_seed(seed: int, device: torch.device) -> None:
-    """Seed the main random number generators."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(seed)
-    elif device.type == "mps":
-        torch.mps.manual_seed(seed)
-
-
-def get_torch_rng_state(device: torch.device):
-    """Capture CPU and selected accelerator RNG state for isolated evaluation."""
-    state = {"cpu": torch.get_rng_state()}
-    if device.type == "cuda":
-        state["cuda"] = torch.cuda.get_rng_state_all()
-    elif device.type == "mps":
-        state["mps"] = torch.mps.get_rng_state(device)
-    return state
-
-
-def set_torch_rng_state(state, device: torch.device) -> None:
-    """Restore CPU and selected accelerator RNG state."""
-    torch.set_rng_state(state["cpu"])
-    if device.type == "cuda":
-        torch.cuda.set_rng_state_all(state["cuda"])
-    elif device.type == "mps":
-        torch.mps.set_rng_state(state["mps"], device)
-
-
-def seed_torch_rng(seed: int, device: torch.device) -> None:
-    """Seed the RNG used by a sampled policy on the selected device."""
-    if device.type == "cuda":
-        torch.cuda.manual_seed_all(seed)
-    elif device.type == "mps":
-        torch.mps.manual_seed(seed)
-    else:
-        torch.manual_seed(seed)
+GLOBAL_SEED=int(os.getenv("GLOBAL_SEED", np.nan))
+NUM_EPISODES=int(os.getenv("NUM_EPISODES", np.nan))
+ROLLOUT_EPISODES=int(os.getenv("ROLLOUT_EPISODES", np.nan))
+MAX_STEPS=int(os.getenv("MAX_STEPS", np.nan))
+RENDER=os.getenv("RENDER", "False").strip().lower() == "true"
+HIDDEN_DIM=int(os.getenv("HIDDEN_DIM", np.nan))
+CHECKPOINT_PATH=Path(os.getenv("CHECKPOINT_PATH", "."))
+EVAL_INTERVAL=int(os.getenv("EVAL_INTERVAL", np.nan))
+EVAL_EPISODES=int(os.getenv("EVAL_EPISODES", np.nan))
+EVAL_SEED=int(os.getenv("EVAL_SEED", np.nan))
+TEST_EPISODES=int(os.getenv("TEST_EPISODES", np.nan))
+TEST_SEED=int(os.getenv("TEST_SEED", np.nan))
+SHAPING=os.getenv("SHAPING", "True").strip().lower() == "true"
+TEST_OBSERVATION_FAILURE_STEPS=int(os.getenv("TEST_OBSERVATION_FAILURE_STEPS", np.nan))
 
 
 def run_episode(env,
@@ -117,6 +76,9 @@ def run_episode(env,
         if not env.agents:
             break
 
+        #unwrapping world for reward shaping
+        world = env.unwrapped.world
+
         # Collect observations from the agents
         active_predators = [agent for agent in predator_agents if agent in env.agents ]
         predator_obs = np.stack([observations[agent] for agent in active_predators])
@@ -145,15 +107,33 @@ def run_episode(env,
         if capture_step is None and all(terminations.get(agent, False) for agent in prey_agents):
             capture_step = step + 1
 
+        #compute shaping rewards
+        targets = [a for a in world.agents if not a.adversary]
+        adversaries = [a for a in world.agents if a.adversary]
+        shape_rewards = 0
+        for adv in adversaries:
+            shape_rewards -= 0.1 * min([np.sqrt(np.sum(np.square(a.state.p_pos - adv.state.p_pos)))for a in targets])
+
+        if SHAPING:
+            team_rewards = torch.tensor(
+                        [
+                            rewards[agent] + shape_rewards
+                            for agent in predator_agents
+                        ],
+                        dtype=torch.float32,
+                        device=device,
+                    )
+
         # compute the rewards
-        team_rewards = torch.tensor(
-            [
-                rewards[agent]
-                for agent in predator_agents
-            ],
-            dtype=torch.float32,
-            device=device,
-        )
+        else:
+            team_rewards = torch.tensor(
+                [
+                    rewards[agent]
+                    for agent in predator_agents
+                ],
+                dtype=torch.float32,
+                device=device,
+            )
 
         team_reward = team_rewards.mean()
         episode_reward += team_reward.item()
@@ -229,103 +209,7 @@ def run_episode(env,
     }
 
 
-@torch.no_grad()
-def evaluate_policy(
-    actor: Actor | None,
-    device: torch.device,
-    seed: int,
-    episodes: int = EVAL_EPISODES,
-    action_mode: str = "argmax",
-) -> list[dict[str, float | bool | int | None]]:
-    """Evaluate an actor or random policy on a fixed set of episode seeds."""
-    if action_mode not in {"argmax", "sample", "random"}:
-        raise ValueError(f"Unknown evaluation action mode: {action_mode}")
-    if action_mode != "random" and actor is None:
-        raise ValueError("An actor is required for argmax and sampled evaluation.")
 
-    env = get_env()
-    actor_was_training = actor.training if actor is not None else None
-    if actor is not None:
-        actor.eval()
-    episode_returns = []
-    torch_rng_state = get_torch_rng_state(device)
-
-    try:
-        predators = [agent for agent in env.possible_agents if "adversary" in agent]
-        prey_agents = [agent for agent in env.possible_agents if "adversary" not in agent]
-        for episode_index in range(episodes):
-            episode_seed = seed + episode_index
-            # Make sampled-policy evaluation repeatable without changing training RNG state.
-            seed_torch_rng(episode_seed, device)
-            observations, _ = env.reset(seed=episode_seed)
-            for agent_index, agent in enumerate(env.possible_agents):
-                env.action_space(agent).seed(episode_seed + agent_index + 1)
-
-            hidden_state = Utils.init_hidden_state(len(predators), HIDDEN_DIM)
-            mask = Utils.init_rnn_mask(len(predators), 1)
-            episode_return = 0.0
-            capture_step = None
-
-            for step_index in range(MAX_STEPS):
-                if not env.agents:
-                    break
-
-                active_predators = [agent for agent in predators if agent in env.agents]
-                predator_obs = torch.as_tensor(
-                    np.stack([observations[agent] for agent in active_predators]),
-                    dtype=torch.float32,
-                    device=device,
-                )
-                actions = {
-                    agent: env.action_space(agent).sample()
-                    for agent in env.agents
-                    if agent not in predators
-                }
-                if action_mode == "random":
-                    actions.update({
-                        agent: env.action_space(agent).sample()
-                        for agent in active_predators
-                    })
-                else:
-                    dist, next_hidden_state = actor(predator_obs, hidden_state, mask)
-                    if action_mode == "argmax":
-                        predator_actions = dist.probs.argmax(dim=-1)
-                    else:
-                        predator_actions = dist.sample()
-                    for index, agent in enumerate(active_predators):
-                        actions[agent] = int(predator_actions[index].item())
-                    hidden_state = next_hidden_state
-
-                observations, rewards, terminations, truncations, _infos = env.step(actions)
-                episode_return += float(np.mean([rewards[agent] for agent in predators]))
-                if capture_step is None and all(
-                    terminations.get(agent, False) for agent in prey_agents
-                ):
-                    capture_step = step_index + 1
-                episode_done = all(
-                    terminations.get(agent, False) or truncations.get(agent, False)
-                    for agent in predators
-                )
-                mask = torch.full(
-                    (len(predators), 1), 0.0 if episode_done else 1.0,
-                    dtype=torch.float32,
-                    device=device,
-                )
-                if episode_done:
-                    break
-
-            episode_returns.append({
-                "return": episode_return,
-                "captured": capture_step is not None,
-                "capture_step": capture_step,
-            })
-    finally:
-        env.close()
-        set_torch_rng_state(torch_rng_state, device)
-        if actor is not None:
-            actor.train(actor_was_training)
-
-    return episode_returns
 
 
 def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
@@ -346,35 +230,80 @@ def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
         critic = Critic(state_dim, HIDDEN_DIM).to(device)
         critic_optimizer = torch.optim.Adam(critic.parameters(), lr=5e-4, eps=1e-5)
         trainer = MAPPOTrainer(
-            actor, actor_optimizer, critic, critic_optimizer, ppo_epochs=5
+            actor, actor_optimizer, critic, critic_optimizer, ppo_epochs=10
         )
 
-        best_eval_mean = float("-inf")
-        successful_episodes = 0
+        best_eval_mean = float("-inf") #changed mean to -inf to make sure it actually saves 
         first_capture_episode = None
-        for episode_index in range(NUM_EPISODES):
-            buffer = RolloutBuffer(
-                MAX_STEPS,
-                predator_count,
-                obs_dim,
-                state_dim,
-                HIDDEN_DIM,
-                device,
+        recent_captures = deque(maxlen=100)
+        episode_index = 0
+        update_index = 0
+        next_evaluation_episode = EVAL_INTERVAL
+
+        while episode_index < NUM_EPISODES:
+            rollout_buffers = []
+            batch_captures = 0
+            episodes_in_update = min(
+                ROLLOUT_EPISODES,
+                NUM_EPISODES - episode_index,
             )
-            episode_seed = seed + episode_index
-            result = run_episode(env, episode_seed, actor, critic, buffer, device)
-            trainer.update(buffer)
-            if result["captured"]:
-                successful_episodes += 1
-                if first_capture_episode is None:
-                    first_capture_episode = episode_index + 1
+
+            # Keep the policy fixed while collecting a larger on-policy batch.
+            for _ in range(episodes_in_update):
+                buffer = RolloutBuffer(
+                    MAX_STEPS,
+                    predator_count,
+                    obs_dim,
+                    state_dim,
+                    HIDDEN_DIM,
+                    device,
+                )
+                episode_seed = seed + episode_index
+                result = run_episode(
+                    env,
+                    episode_seed,
+                    actor,
+                    critic,
+                    buffer,
+                    device,
+                )
+                rollout_buffers.append(buffer)
+
+                episode_index += 1
+                recent_captures.append(result["captured"])
+                if result["captured"]:
+                    batch_captures += 1
+                    if first_capture_episode is None:
+                        first_capture_episode = episode_index
+
+                print(
+                    f"Seed {seed} | Episode {episode_index} | "
+                    f"Steps: {result['steps']} | Train return: {result['rewards']:.2f} | "
+                    f"Captured: {'yes at step ' + str(result['capture_step']) if result['captured'] else 'no'} | "
+                    f"Recent capture rate (last {len(recent_captures)}): "
+                    f"{np.mean(recent_captures):.0%} | "
+                    f"First capture episode: {first_capture_episode or 'none'}"
+                )
+
+            print(
+                f"Seed {seed} | Rollout batch capture rate: "
+                f"{batch_captures / episodes_in_update:.0%} "
+                f"({batch_captures}/{episodes_in_update})"
+            )
+
+            # Perform one PPO update using every episode collected above.
+            trainer.update(rollout_buffers)
+            update_index += 1
 
             should_evaluate = (
-                (episode_index + 1) % EVAL_INTERVAL == 0
-                or episode_index + 1 == NUM_EPISODES
+                episode_index >= next_evaluation_episode
+                or episode_index == NUM_EPISODES
             )
             if should_evaluate:
-                eval_episodes = evaluate_policy(actor, device, eval_seed)
+                while next_evaluation_episode <= episode_index:
+                    next_evaluation_episode += EVAL_INTERVAL
+
+                eval_episodes = actor.evaluate_policy(device, eval_seed, int(os.getenv("EVAL_EPISODES", np.nan)))
                 eval_returns = [episode["return"] for episode in eval_episodes]
                 eval_mean = float(np.mean(eval_returns))
                 eval_std = float(np.std(eval_returns))
@@ -382,7 +311,7 @@ def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
                     episode["captured"] for episode in eval_episodes
                 ]))
                 print(
-                    f"Seed {seed} | Episode {episode_index + 1} | "
+                    f"Seed {seed} | Update {update_index} | Episode {episode_index} | "
                     f"Eval return: {eval_mean:.2f} +/- {eval_std:.2f} | "
                     f"Capture rate: {eval_capture_rate:.0%}"
                 )
@@ -398,9 +327,11 @@ def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
                             "evaluation_returns": eval_returns,
                             "eval_capture_rate": eval_capture_rate,
                             "training_seed": seed,
-                            "episode": episode_index + 1,
+                            "episode": episode_index,
+                            "update": update_index,
                             "config": {
                                 "num_episodes": NUM_EPISODES,
+                                "rollout_episodes": ROLLOUT_EPISODES,
                                 "max_steps": MAX_STEPS,
                                 "hidden_dim": HIDDEN_DIM,
                                 "ppo_epochs": trainer.ppo_epochs,
@@ -421,14 +352,6 @@ def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
                     )
                     print(f"Saved best evaluated actor to {CHECKPOINT_PATH}")
 
-            print(
-                f"Seed {seed} | Episode {episode_index + 1} | "
-                f"Steps: {result['steps']} | Train return: {result['rewards']:.2f} | "
-                f"Captured: {'yes at step ' + str(result['capture_step']) if result['captured'] else 'no'} | "
-                f"Capture rate: {successful_episodes / (episode_index + 1):.0%} | "
-                f"First capture episode: {first_capture_episode or 'none'}"
-            )
-
         best_checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
         actor.load_state_dict(best_checkpoint["actor_state_dict"])
         return {
@@ -445,17 +368,19 @@ def test_checkpoint(actor: Actor, device: torch.device) -> dict[str, float]:
         f"(seeds {TEST_SEED}–{TEST_SEED + TEST_EPISODES - 1})..."
     )
     results = {}
-    for label, policy, mode in (
-        ("PPO deterministic", actor, "argmax"),
-        ("PPO sampled", actor, "sample"),
-        ("Random", None, "random"),
+    for label, policy, mode, mask in ( #add masking boolean, to compare no mask + mask
+        ("PPO deterministic", actor, "argmax", False),
+        ("PPO sampled", actor, "sample", False),
+        ("PPO deterministic obs loss", actor, "argmax",True),
+        ("PPO sampled obs loss", actor, "sample", True),
+        ("Random", actor, "random", False),
     ):
-        episodes = evaluate_policy(
-            policy,
+        episodes = actor.evaluate_policy(
             device,
             TEST_SEED,
             TEST_EPISODES,
             action_mode=mode,
+            masking=mask
         )
         returns = [episode["return"] for episode in episodes]
         mean = float(np.mean(returns))
