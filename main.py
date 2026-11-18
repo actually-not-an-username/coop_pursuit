@@ -233,7 +233,7 @@ def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
             actor, actor_optimizer, critic, critic_optimizer, ppo_epochs=5
         )
 
-        best_eval_mean = float("inf")
+        best_eval_mean = float("-inf") #changed mean to -inf to make sure it actually saves 
         first_capture_episode = None
         recent_captures = deque(maxlen=100)
         episode_index = 0
