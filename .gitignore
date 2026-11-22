@@ -2,7 +2,8 @@
 __pycache__/
 *.py[codz]
 *$py.class
-
+#I just want to press git add ., so checkpoints is going in here
+checkpoints/
 # C extensions
 *.so
 

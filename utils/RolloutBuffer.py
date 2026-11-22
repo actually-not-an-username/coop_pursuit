@@ -32,6 +32,12 @@ class RolloutBuffer:
             obs_dim,
             device=device,
         )
+        self.actor_obs = torch.zeros(
+            rollout_length + 1, # T+1, last one is actually used
+            num_agents,
+            obs_dim,
+            device=device,
+        )
 
         self.states = torch.zeros(
             rollout_length + 1,
@@ -106,6 +112,7 @@ class RolloutBuffer:
 
     def insert(self,
                observation,
+               actor_obs,
                state,
                actor_hidden,
                critic_hidden,
@@ -129,6 +136,7 @@ class RolloutBuffer:
 
         # Current timestep
         self.observations[t].copy_(observation)
+        self.actor_obs[t].copy_(actor_obs)
         self.states[t].copy_(state)
         self.actor_hidden_states[t].copy_(actor_hidden)
         self.critic_hidden_states[t].copy_(critic_hidden)
@@ -200,7 +208,7 @@ class RolloutBuffer:
             end = min(start + recurrent_chunk_length, t)
 
             # Actor data
-            observations = self.observations[start:end]
+            observations = self.actor_obs[start:end]
             actions = self.actions[start:end]
             old_log_probs = self.old_log_probs[start:end]
             actor_masks = self.actor_rnn_masks[start:end]
