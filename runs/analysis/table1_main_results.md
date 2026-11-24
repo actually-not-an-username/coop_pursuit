@@ -1,0 +1,10 @@
+**Table 1. Capture rate (%) on key conditions ('best' checkpoint, mean ± 95% CI over 5 seeds)**
+
+| Condition (length / blinded / fill) | Full observation | Observation masked | Random policy | Masked − clean | Full observation (reached blackout) | Observation masked (reached blackout) |
+|---|---|---|---|---|---|---|
+| no blackout | 84.7 ± 8.7 | 80.7 ± 7.7 | 7.3 | -4.0 ± 9.7 | — | — |
+| 20 / 1 / zero | 81.7 ± 10.2 | 78.7 ± 8.2 | 7.3 | -2.9 ± 11.0 | 78.0 ± 11.7 | 74.2 ± 9.5 |
+| 20 / 2 / zero | 78.4 ± 10.3 | 75.1 ± 10.7 | 7.3 | -3.3 ± 12.3 | 74.0 ± 11.6 | 69.8 ± 12.5 |
+| 40 / 2 / zero | 68.9 ± 17.9 | 69.4 ± 7.8 | 7.3 | 0.5 ± 17.7 | 62.5 ± 20.5 | 62.8 ± 9.0 |
+| permanent / 1 / zero | 70.1 ± 12.3 | 69.1 ± 9.7 | 7.3 | -1.0 ± 13.1 | 63.9 ± 13.3 | 62.6 ± 10.6 |
+| permanent / 2 / zero | 56.0 ± 14.5 | 52.6 ± 7.6 | 7.3 | -3.4 ± 14.4 | 46.7 ± 15.2 | 42.4 ± 7.6 |

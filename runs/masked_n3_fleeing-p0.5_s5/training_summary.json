@@ -1,0 +1,9 @@
+{
+  "episodes_used": 2688,
+  "base_episodes": 2048,
+  "extended": true,
+  "best_noloss_validation": 0.85,
+  "val_threshold": 0.75,
+  "reached_threshold": true,
+  "wall_time_s": 4109.6
+}

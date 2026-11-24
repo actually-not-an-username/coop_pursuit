@@ -1,0 +1,33 @@
+Metric,Condition,Method,s1,s2,s3,s4,s5,Mean,±CI
+Formation spread,none,Full observation,0.785,0.829,0.727,0.874,0.799,0.803,0.068
+Formation spread,none,Observation masked,0.923,0.865,0.744,0.818,0.866,0.843,0.083
+Formation spread,2 for 20,Full observation,0.861,1.116,0.771,0.89,1.033,0.934,0.172
+Formation spread,2 for 20,Observation masked,0.974,0.91,0.828,0.896,0.936,0.909,0.067
+Formation spread,perm  1,Full observation,0.937,1.362,0.863,0.989,1.566,1.143,0.378
+Formation spread,perm  1,Observation masked,1.161,0.983,0.95,0.971,1.033,1.02,0.105
+Formation spread,perm  2,Full observation,1.0,1.79,0.853,0.971,1.929,1.308,0.631
+Formation spread,perm  2,Observation masked,1.206,1.062,0.988,1.03,1.048,1.067,0.103
+Max angular gap (deg),none,Full observation,274.996,269.329,280.663,274.29,281.821,276.22,6.326
+Max angular gap (deg),none,Observation masked,273.682,277.324,286.398,273.453,272.989,276.769,7.019
+Max angular gap (deg),2 for 20,Full observation,275.6,263.401,281.119,277.599,274.097,274.363,8.28
+Max angular gap (deg),2 for 20,Observation masked,273.289,274.132,282.185,272.622,274.862,275.418,4.813
+Max angular gap (deg),perm  1,Full observation,271.932,264.609,278.872,270.748,269.742,271.181,6.367
+Max angular gap (deg),perm  1,Observation masked,266.048,271.024,277.457,270.985,270.068,271.116,5.082
+Max angular gap (deg),perm  2,Full observation,276.375,260.752,285.701,277.352,269.633,273.963,11.588
+Max angular gap (deg),perm  2,Observation masked,271.528,270.087,278.612,272.664,273.322,273.243,4.027
+Mean pursuer–prey distance,none,Full observation,0.795,0.816,0.766,0.876,0.876,0.826,0.061
+Mean pursuer–prey distance,none,Observation masked,0.959,0.877,0.905,0.839,0.873,0.891,0.056
+Mean pursuer–prey distance,2 for 20,Full observation,0.883,1.012,0.836,0.927,1.044,0.94,0.108
+Mean pursuer–prey distance,2 for 20,Observation masked,1.006,0.906,0.938,0.916,0.964,0.946,0.05
+Mean pursuer–prey distance,perm  1,Full observation,0.888,1.123,0.862,0.936,1.345,1.031,0.252
+Mean pursuer–prey distance,perm  1,Observation masked,1.049,0.931,0.98,0.945,0.973,0.976,0.057
+Mean pursuer–prey distance,perm  2,Full observation,1.029,1.55,0.96,1.019,1.826,1.277,0.483
+Mean pursuer–prey distance,perm  2,Observation masked,1.199,1.022,1.074,1.054,1.087,1.087,0.083
+Collisions / episode,none,Full observation,1.157,1.22,1.827,1.407,1.773,1.477,0.385
+Collisions / episode,none,Observation masked,0.983,1.16,2.22,1.66,1.373,1.479,0.602
+Collisions / episode,2 for 20,Full observation,1.283,0.797,1.737,1.533,1.21,1.312,0.442
+Collisions / episode,2 for 20,Observation masked,1.123,1.18,1.937,1.473,1.227,1.388,0.415
+Collisions / episode,perm  1,Full observation,0.983,0.87,1.367,1.07,1.107,1.079,0.229
+Collisions / episode,perm  1,Observation masked,0.86,0.893,1.407,1.21,1.053,1.085,0.283
+Collisions / episode,perm  2,Full observation,1.027,0.567,1.577,1.24,0.727,1.027,0.5
+Collisions / episode,perm  2,Observation masked,1.133,0.76,1.047,0.787,0.93,0.931,0.201

@@ -1,0 +1,10 @@
+**Table B7. Data for Fig 7: capture rate (%) per seed (zero fill)**
+
+| Condition | Method | s1 | s2 | s3 | s4 | s5 | Mean |
+|---|---|---|---|---|---|---|---|
+| none | Full observation | 94.3 | 89.3 | 77.3 | 82.7 | 80.0 | 84.7 |
+| none | Observation masked | 73.0 | 86.0 | 77.0 | 88.0 | 79.7 | 80.7 |
+| perm 1 | Full observation | 83.3 | 69.3 | 64.0 | 76.0 | 58.0 | 70.1 |
+| perm 1 | Observation masked | 60.3 | 77.7 | 61.3 | 73.0 | 73.3 | 69.1 |
+| perm 2 | Full observation | 72.0 | 48.3 | 49.7 | 64.7 | 45.3 | 56.0 |
+| perm 2 | Observation masked | 46.3 | 61.7 | 48.0 | 52.0 | 55.0 | 52.6 |

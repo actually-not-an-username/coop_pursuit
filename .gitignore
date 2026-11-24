@@ -226,3 +226,6 @@ __MACOSX/
 .AppleDouble
 .LSOverride
 Icon[]
+# Experiment outputs
+runs*/
+*.log
