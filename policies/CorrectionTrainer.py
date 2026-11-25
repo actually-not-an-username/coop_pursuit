@@ -7,7 +7,6 @@ from torch.optim import Optimizer
 from policies.CorrectionBlock import CorrectionBlock
 from utils.RolloutBuffer import RolloutBuffer
 
-
 class CorrectionTrainer:
     """Train a CorrectionBlock from complete observations and prior estimates."""
 
@@ -113,16 +112,26 @@ class CorrectionTrainer:
             real_input[:, lost_mask] = 0.0
             prior_input = full_prior.clone()
             prior_input[:, ~lost_mask] = 0.0
+            if self.corrector.use_trust:
+                error = F.mse_loss(real_input+prior_input, true_observations, reduction='none')
+                agent_error = error.mean(dim=-1)
+                trust_score = 1/(1+agent_error)
 
             real_flat = real_input.reshape(batch_size, -1)
             prior_flat = prior_input.reshape(batch_size, -1)
 
             self.optimizer.zero_grad()
-
-            predicted_observations = self.corrector(
-                real_flat,
-                prior_flat,
-            ).reshape_as(true_observations)
+            if self.corrector.use_trust:
+                predicted_observations = self.corrector(
+                    real_flat,
+                    prior_flat,
+                    trust_score,
+                ).reshape_as(true_observations)
+            else:
+                predicted_observations = self.corrector(
+                    real_flat,
+                    prior_flat,
+                ).reshape_as(true_observations)
             loss = F.mse_loss(
                 predicted_observations[:, lost_mask],
                 true_observations[:, lost_mask],

@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 from numpy.random import random
 import torch
-
+import torch.nn.functional as F
 from policies.Actor import Actor
 from policies.Critic import Critic
 from policies.MAPPOTrainer import MAPPOTrainer
@@ -38,6 +38,7 @@ TEST_EPISODES=int(os.getenv("TEST_EPISODES", np.nan))
 TEST_SEED=int(os.getenv("TEST_SEED", np.nan))
 SHAPING=os.getenv("SHAPING", "True").strip().lower() == "true"
 TEST_OBSERVATION_FAILURE_STEPS=int(os.getenv("TEST_OBSERVATION_FAILURE_STEPS", np.nan))
+TRUST = os.getenv("TRUST", "False").strip().lower() == "true"
 
 
 def run_episode(env,
@@ -113,7 +114,17 @@ def run_episode(env,
 
                 env_flat = environment_obs.reshape(1,-1)
                 prior_flat = prior_obs.reshape(1,-1)
-                corrected_flat = corrector(env_flat, prior_flat)
+                if corrector.use_trust:
+                    error = F.mse_loss(
+                        environment_obs + prior_obs,
+                        predator_obs,
+                        reduction="none",
+                    )
+                    agent_error = error.mean(dim=-1)
+                    trust_score = (1 / (1 + agent_error)).unsqueeze(0)
+                    corrected_flat = corrector(env_flat,prior_flat,trust_score)
+                else:
+                    corrected_flat = corrector(env_flat, prior_flat)
                 corrected_obs = corrected_flat.reshape_as(predator_obs)
                 corrected_obs[~not_chosen] = predator_obs[~not_chosen]
                 actor_obs = corrected_obs
@@ -264,7 +275,10 @@ def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
         actor_optimizer = torch.optim.Adam(actor.parameters(), lr=5e-4, eps=1e-5)
         critic = Critic(state_dim, HIDDEN_DIM).to(device)
         critic_optimizer = torch.optim.Adam(critic.parameters(), lr=5e-4, eps=1e-5)
-        corrector = CorrectionBlock(obs_dim * predator_count, HIDDEN_DIM).to(device)
+        if TRUST:
+            corrector = CorrectionBlock(obs_dim * predator_count, HIDDEN_DIM, predator_count).to(device)
+        else:
+            corrector = CorrectionBlock(obs_dim * predator_count, HIDDEN_DIM).to(device)
         corrector_optimizer = torch.optim.Adam(corrector.parameters(), lr=5e-4, eps=1e-5)
         trainer = MAPPOTrainer(
             actor, actor_optimizer, critic, critic_optimizer, ppo_epochs=10
@@ -371,6 +385,8 @@ def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
                     torch.save(
                         {
                             "actor_state_dict": actor.state_dict(),
+                            "corrector_state_dict": corrector.state_dict(),
+                            "corrector_use_trust": corrector.use_trust,
                             "best_eval_mean": best_eval_mean,
                             "best_eval_std": eval_std,
                             "evaluation_returns": eval_returns,
@@ -403,33 +419,47 @@ def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
 
         best_checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
         actor.load_state_dict(best_checkpoint["actor_state_dict"])
+        corrector.load_state_dict(best_checkpoint["corrector_state_dict"])
         return {
-            "test_results": test_checkpoint(actor, device),
+            "test_results": test_checkpoint(actor, corrector, device),
         }
     finally:
         env.close()
 
 
-def test_checkpoint(actor: Actor, device: torch.device) -> dict[str, float]:
+def test_checkpoint(
+    actor: Actor,
+    corrector: CorrectionBlock | None,
+    device: torch.device,
+) -> dict[str, float]:
     """Compare a trained actor and random policy on identical held-out seeds."""
     print(
         f"Testing on {TEST_EPISODES} held-out episodes "
         f"(seeds {TEST_SEED}–{TEST_SEED + TEST_EPISODES - 1})..."
     )
     results = {}
-    for label, policy, mode, mask in ( #add masking boolean, to compare no mask + mask
-        ("PPO deterministic", actor, "argmax", False),
-        ("PPO sampled", actor, "sample", False),
-        ("PPO deterministic obs loss", actor, "argmax",True),
-        ("PPO sampled obs loss", actor, "sample", True),
-        ("Random", actor, "random", False),
-    ):
+    evaluation_modes = [
+        ("PPO deterministic", "argmax", False, False),
+        ("PPO sampled", "sample", False, False),
+        ("PPO deterministic obs loss", "argmax", True, False),
+        ("PPO sampled obs loss", "sample", True, False),
+    ]
+    if corrector is not None:
+        evaluation_modes.extend([
+            ("PPO deterministic obs loss + correction", "argmax", True, True),
+            ("PPO sampled obs loss + correction", "sample", True, True),
+        ])
+    evaluation_modes.append(("Random", "random", False, False))
+
+    for label, mode, mask, use_correction in evaluation_modes:
         episodes = actor.evaluate_policy(
             device,
             TEST_SEED,
             TEST_EPISODES,
             action_mode=mode,
-            masking=mask
+            masking=mask,
+            corrector=corrector,
+            use_correction=use_correction,
         )
         returns = [episode["return"] for episode in episodes]
         mean = float(np.mean(returns))
@@ -453,19 +483,37 @@ def test_saved_checkpoint(device: torch.device) -> dict[str, float]:
             f"No checkpoint at {CHECKPOINT_PATH}. Train first or set CHECKPOINT_PATH."
         )
 
+    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
     env = get_env()
     try:
         sample_predator_id = "adversary_0"
         observation_dim = env.observation_space(sample_predator_id).shape[0]
         action_dim = env.action_space(sample_predator_id).n
+        predator_count = sum(
+            "adversary" in agent for agent in env.possible_agents
+        )
         actor = Actor(observation_dim, HIDDEN_DIM, action_dim).to(device)
+        corrector = None
+        if "corrector_state_dict" in checkpoint:
+            trust_dim = (
+                predator_count
+                if checkpoint.get("corrector_use_trust", False)
+                else None
+            )
+            corrector = CorrectionBlock(
+                observation_dim * predator_count,
+                HIDDEN_DIM,
+                trust_dim,
+            ).to(device)
+            corrector.load_state_dict(checkpoint["corrector_state_dict"])
     finally:
         env.close()
 
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
     actor.load_state_dict(checkpoint["actor_state_dict"])
     print(f"Loaded checkpoint from {CHECKPOINT_PATH}")
-    return test_checkpoint(actor, device)
+    if corrector is None:
+        print("Checkpoint has no correction block; skipping corrected evaluations.")
+    return test_checkpoint(actor, corrector, device)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train or test the MAPPO policy.")

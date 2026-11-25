@@ -4,6 +4,7 @@ import torch
 import os
 import numpy as np
 from torch import nn
+import torch.nn.functional as F
 from torch.distributions import Categorical
 
 from policies.Rnn import RNNLayer
@@ -76,12 +77,20 @@ class Actor(nn.Module):
                 episodes: int,
                 action_mode: str = "argmax",
                 masking : bool = False, #adding to make training not masked, eval masked
+                corrector: nn.Module | None = None,
+                use_correction: bool = False,
         ) -> list[dict[str, float | bool | int | None]]:
             """Evaluate an actor or random policy on a fixed set of episode seeds."""
             if action_mode not in {"argmax", "sample", "random"}:
                 raise ValueError(f"Unknown evaluation action mode: {action_mode}")
+            if use_correction and corrector is None:
+                raise ValueError(
+                    "A correction block is required when use_correction is enabled."
+                )
 
             self.eval()
+            if corrector is not None:
+                corrector.eval()
             env = EnvUtils.get_env()
             episode_returns = []
 
@@ -102,23 +111,78 @@ class Actor(nn.Module):
 
                     # As a design choice we want only one attacker to be able to see the rest of them will go blind :)
                     # and also for a certain number of steps
-                    starting_sensor_loss_step = random.randint(0, MAX_STEPS-TEST_OBSERVATION_FAILURE_STEPS)
-                    the_chosen = predators[random.randint(0, len(predators) - 1)]
+                    episode_rng = random.Random(episode_seed)
+                    starting_sensor_loss_step = episode_rng.randint(
+                        0,
+                        MAX_STEPS - TEST_OBSERVATION_FAILURE_STEPS,
+                    )
+                    the_chosen = predators[
+                        episode_rng.randint(0, len(predators) - 1)
+                    ]
+                    lost_mask = torch.tensor(
+                        [agent != the_chosen for agent in predators],
+                        dtype=torch.bool,
+                        device=device,
+                    )
 
                     for step_index in range(MAX_STEPS):
                         if not env.agents:
                             break
-                        #masking now checked
-                        if step_index >= starting_sensor_loss_step and step_index < (starting_sensor_loss_step + TEST_OBSERVATION_FAILURE_STEPS) and masking:
-                            for agent in predators:
-                                if agent != the_chosen:
-                                    observations[agent] = np.zeros_like(observations[agent])
 
                         predator_obs = torch.as_tensor(
                             np.stack([observations[agent] for agent in predators]),
                             dtype=torch.float32,
                             device=device,
                         )
+
+                        sensor_loss_active = (
+                            masking
+                            and step_index >= starting_sensor_loss_step
+                            and step_index < (
+                                starting_sensor_loss_step
+                                + TEST_OBSERVATION_FAILURE_STEPS
+                            )
+                        )
+                        if sensor_loss_active:
+                            if use_correction:
+                                environment_obs = predator_obs.clone()
+                                environment_obs[lost_mask] = 0.0
+
+                                # Until the world model is available, use the
+                                # complete observations as oracle priors.
+                                prior_obs = predator_obs.clone()
+                                prior_obs[~lost_mask] = 0.0
+
+                                env_flat = environment_obs.reshape(1, -1)
+                                prior_flat = prior_obs.reshape(1, -1)
+                                if getattr(corrector, "use_trust", False):
+                                    error = F.mse_loss(
+                                        environment_obs + prior_obs,
+                                        predator_obs,
+                                        reduction="none",
+                                    )
+                                    agent_error = error.mean(dim=-1)
+                                    trust_score = (
+                                        1 / (1 + agent_error)
+                                    ).unsqueeze(0)
+                                    corrected_flat = corrector(
+                                        env_flat,
+                                        prior_flat,
+                                        trust_score,
+                                    )
+                                else:
+                                    corrected_flat = corrector(
+                                        env_flat,
+                                        prior_flat,
+                                    )
+
+                                corrected_obs = corrected_flat.reshape_as(
+                                    predator_obs
+                                )
+                                corrected_obs[~lost_mask] = predator_obs[~lost_mask]
+                                predator_obs = corrected_obs
+                            else:
+                                predator_obs[lost_mask] = 0.0
 
                         actions = {
                             agent: env.action_space(agent).sample()
