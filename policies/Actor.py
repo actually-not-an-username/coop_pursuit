@@ -109,7 +109,7 @@ class Actor(nn.Module):
                         if not env.agents:
                             break
                         #masking now checked
-                        if step_index >= starting_sensor_loss_step and step_index < (starting_sensor_loss_step + TEST_OBSERVATION_FAILURE_STEPS) and masking:
+                        if starting_sensor_loss_step <= step_index < (starting_sensor_loss_step + TEST_OBSERVATION_FAILURE_STEPS) and masking:
                             for agent in predators:
                                 if agent != the_chosen:
                                     observations[agent] = np.zeros_like(observations[agent])

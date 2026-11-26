@@ -227,3 +227,6 @@ __MACOSX/
 .AppleDouble
 .LSOverride
 Icon[]
+
+# ignoring IDE stuff
+.idea/

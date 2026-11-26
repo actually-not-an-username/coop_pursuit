@@ -38,7 +38,10 @@ def init_hidden_state(batch_size, hidden_dimension, recurrent_layers = 1):
     # format as [B (batch size), L (layers), H (hidden dimensions)] due to RNN Layer requirements
     return torch.zeros(batch_size, recurrent_layers, hidden_dimension, device=get_torch_device())
 
-def init_rnn_mask(batch_size, mask_dimension):
+def init_rnn_mask(batch_size, mask_dimension, num_agents : int = 0):
+    if num_agents > 0:
+        return torch.zeros(batch_size, num_agents, mask_dimension, device=get_torch_device())
+
     return torch.zeros(batch_size, mask_dimension, device=get_torch_device())
 
 def update_linear_schedule(optimizer, epoch, total_num_epochs, initial_lr):
