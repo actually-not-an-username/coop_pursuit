@@ -6,11 +6,14 @@ from collections import deque
 from pathlib import Path
 
 import numpy as np
+from numpy.random import random
 import torch
 
 from policies.Actor import Actor
 from policies.Critic import Critic
 from policies.MAPPOTrainer import MAPPOTrainer
+from policies.CorrectionBlock import CorrectionBlock
+from policies.CorrectionTrainer import CorrectionTrainer
 from utils import Utils
 from utils.EnvUtils import get_env, set_seed
 from utils.RolloutBuffer import RolloutBuffer
@@ -41,6 +44,7 @@ def run_episode(env,
                 episode_seed: int,
                 actor: Actor,
                 critic: Critic,
+                corrector:CorrectionBlock,
                 buffer: RolloutBuffer,
                 device: torch.device) -> dict:
     """Run one episode and return the cumulative mean predator reward."""
@@ -67,6 +71,14 @@ def run_episode(env,
     critic_hidden_states = Utils.init_hidden_state(1, HIDDEN_DIM)
     critic_rnn_mask = Utils.init_rnn_mask(1 , 1)
     buffer.critic_rnn_masks[0].copy_(critic_rnn_mask)
+    #for masking
+    starting_sensor_loss_step = np.random.randint(0, MAX_STEPS-TEST_OBSERVATION_FAILURE_STEPS+1)
+    the_chosen = np.random.randint(0, len(predator_agents))
+    not_chosen = torch.tensor(
+        [i != the_chosen for i in range(len(predator_agents))],
+        dtype=torch.bool,
+        device=device,
+        )
 
     steps = 0
     capture_step = None
@@ -79,10 +91,32 @@ def run_episode(env,
         #unwrapping world for reward shaping
         world = env.unwrapped.world
 
+        # #masking stuff might not need
+        # if step >= starting_sensor_loss_step and step < (starting_sensor_loss_step + TEST_OBSERVATION_FAILURE_STEPS):
+        #     for agent in predator_agents:
+        #         if agent != the_chosen:
+        #             observations[agent] = np.zeros_like(observations[agent])
+
+
         # Collect observations from the agents
-        active_predators = [agent for agent in predator_agents if agent in env.agents ]
+        active_predators = [agent for agent in predator_agents if agent in env.agents]
         predator_obs = np.stack([observations[agent] for agent in active_predators])
         predator_obs = torch.from_numpy(predator_obs).float().to(device)
+        actor_obs = predator_obs
+        with torch.no_grad():
+            if step >= starting_sensor_loss_step and step < (starting_sensor_loss_step + TEST_OBSERVATION_FAILURE_STEPS):
+                environment_obs = predator_obs.clone()
+                environment_obs[not_chosen] = 0.0
+
+                prior_obs = predator_obs.clone()
+                prior_obs[~not_chosen] = 0.0
+
+                env_flat = environment_obs.reshape(1,-1)
+                prior_flat = prior_obs.reshape(1,-1)
+                corrected_flat = corrector(env_flat, prior_flat)
+                corrected_obs = corrected_flat.reshape_as(predator_obs)
+                corrected_obs[~not_chosen] = predator_obs[~not_chosen]
+                actor_obs = corrected_obs
 
         # now we connect the policy
         actions = {
@@ -95,7 +129,7 @@ def run_episode(env,
         global_state = torch.as_tensor(global_state, dtype=torch.float32).unsqueeze(0).to(device)
 
         with torch.no_grad():
-            predator_actions, log_proba, next_actor_hidden = actor.act(predator_obs, actor_hidden_states, actor_rnn_mask)
+            predator_actions, log_proba, next_actor_hidden = actor.act(actor_obs, actor_hidden_states, actor_rnn_mask)
             value, next_critic_hidden = critic(global_state, critic_hidden_states, critic_rnn_mask)
 
         # Replace the current random action for one action from the policy
@@ -164,6 +198,7 @@ def run_episode(env,
         next_critic_rnn_mask = torch.full((1, 1), mask_value, dtype=torch.float32).to(device)
 
         buffer.insert(predator_obs,
+                      actor_obs,
                       # remove the first dimension so it accommodates the format of the buffer
                       global_state.squeeze(0),
                       actor_hidden_states,
@@ -229,8 +264,15 @@ def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
         actor_optimizer = torch.optim.Adam(actor.parameters(), lr=5e-4, eps=1e-5)
         critic = Critic(state_dim, HIDDEN_DIM).to(device)
         critic_optimizer = torch.optim.Adam(critic.parameters(), lr=5e-4, eps=1e-5)
+        corrector = CorrectionBlock(obs_dim * predator_count, HIDDEN_DIM).to(device)
+        corrector_optimizer = torch.optim.Adam(corrector.parameters(), lr=5e-4, eps=1e-5)
         trainer = MAPPOTrainer(
             actor, actor_optimizer, critic, critic_optimizer, ppo_epochs=10
+        )
+        correction_trainer = CorrectionTrainer(
+            corrector,
+            corrector_optimizer,
+            correction_epochs=1,
         )
 
         best_eval_mean = float("-inf") #changed mean to -inf to make sure it actually saves 
@@ -264,6 +306,7 @@ def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
                     episode_seed,
                     actor,
                     critic,
+                    corrector,
                     buffer,
                     device,
                 )
@@ -291,10 +334,16 @@ def train(seed: int, device: torch.device) -> dict[str, dict[str, float]]:
                 f"({batch_captures}/{episodes_in_update})"
             )
 
-            # Perform one PPO update using every episode collected above.
+            # Train the correction block using the completed rollout batch.
+            correction_metrics = correction_trainer.update(rollout_buffers)
+            print(
+                f"Correction loss: "
+                f"{correction_metrics['correction_loss']:.4f}"
+            )
+
+            # Train the actor and critic using that same rollout batch.
             trainer.update(rollout_buffers)
             update_index += 1
-
             should_evaluate = (
                 episode_index >= next_evaluation_episode
                 or episode_index == NUM_EPISODES
